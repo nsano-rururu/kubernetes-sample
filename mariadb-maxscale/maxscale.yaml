@@ -1,0 +1,156 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mariadb-maxscale-config
+  labels:
+    app: maxscale
+data:
+  maxscale.cnf: |
+    [maxscale]
+    threads=auto
+    admin_host=0.0.0.0
+
+    [server1]
+    type=server
+    address=mariadb-0.mariadb-svc.default.svc.cluster.local
+    port=3306
+    protocol=mariadbbackend
+
+    [server2]
+    type=server
+    address=mariadb-1.mariadb-svc.default.svc.cluster.local
+    port=3306
+    protocol=mariadbbackend
+
+    [server3]
+    type=server
+    address=mariadb-2.mariadb-svc.default.svc.cluster.local
+    port=3306
+    protocol=mariadbbackend
+
+    # Monitor for the servers
+    # This will keep MaxScale aware of the state of the servers.
+    # MySQL Monitor documentation:
+    # https://github.com/mariadb-corporation/MaxScale/blob/2.3/Documentation/Monitors/MariaDB-Monitor.md
+
+    # replication_user と replication_password が未設定の場合、
+    # フェイルオーバー時に組まれるレプリケーションは
+     #user で設定された maxscale ユーザーでレプリケーションが組まれます
+
+    [MariaDB-Monitor]
+    type=monitor
+    module=mariadbmon
+    servers=server1,server2,server3
+    user=maxuser
+    password=maxpwd
+    auto_failover=true
+    auto_rejoin=true
+    enforce_read_only_slaves=1
+    monitor_interval=2000
+
+    # Service definitions
+    # Service Definition for a read-only service and a read/write splitting service.
+
+    # ReadConnRoute documentation:
+    # https://github.com/mariadb-corporation/MaxScale/blob/2.3/Documentation/Routers/ReadConnRoute.md
+
+    [Read-Only-Service]
+    type=service
+    router=readconnroute
+    servers=server1,server2,server3
+    user=maxuser
+    password=maxpwd
+    router_options=slave
+
+    # ReadWriteSplit documentation:
+    # https://github.com/mariadb-corporation/MaxScale/blob/2.3/Documentation/Routers/ReadWriteSplit.md
+
+    [Read-Write-Service]
+    type=service
+    router=readwritesplit
+    servers=server1,server2,server3
+    user=maxuser
+    password=maxpwd
+    master_failure_mode=fail_on_write
+
+    # Listener definitions for the services
+    # Listeners represent the ports the services will listen on.
+
+    [Read-Only-Listener]
+    type=listener
+    service=Read-Only-Service
+    protocol=mariadbclient
+    port=4008
+
+    [Read-Write-Listener]
+    type=listener
+    service=Read-Write-Service
+    protocol=mariadbclient
+    port=4006
+
+  start-maxscale-instance.sh: |
+    cp /mnt/config-template/maxscale.cnf /mnt/config-map/maxscale.cnf
+    maxscale -d -U maxscale --configdir=/mnt/config-map -lstdout
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: maxscale-svc
+  labels:
+    app: maxscale
+spec:
+  selector:
+    app: maxscale
+  clusterIP: None
+  ports:
+  - name: read-write
+    port: 4006
+    targetPort: 4006
+  - name: read-only
+    port: 4008
+    targetPort: 4008
+  - name: rest-api
+    port: 8989
+    targetPort: 8989
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: maxscale
+  labels:
+    app: maxscale
+spec:
+  serviceName: maxscale
+  selector:
+    matchLabels:
+      app: maxscale
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: maxscale
+    spec:
+      containers:
+      - name: maxscale
+        image: mariadb/maxscale:2.4.2-0
+        command:
+        - bash
+        - /mnt/config-template/start-maxscale-instance.sh
+        ports:
+        - name: read-write
+          containerPort: 4006
+        - name: read-only
+          containerPort: 4008
+        - name: rest-api
+          containerPort: 8989
+        volumeMounts:
+        - name: mariadb-config-vol
+          mountPath: /mnt/config-map
+        - name: start-maxscale
+          mountPath: /mnt/config-template
+      volumes:
+      - name: mariadb-config-vol
+        emptyDir: {}
+      - name: start-maxscale
+        configMap:
+          name: mariadb-maxscale-config

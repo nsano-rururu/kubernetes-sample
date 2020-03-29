@@ -1,0 +1,151 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb-svc
+  labels:
+    app: mariadb
+spec:
+  selector:
+    app: mariadb
+  clusterIP: None
+  ports:
+  - name: mariadb
+    port: 3306
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mariadb-config
+  labels:
+    app: mariadb
+data:
+  # my.cnf: |
+  #   [mysqld]
+
+  users.sql: |
+    RESET MASTER;
+
+    CREATE USER 'maxuser'@'127.0.0.1' IDENTIFIED BY 'maxpwd';
+    CREATE USER 'maxuser'@'%' IDENTIFIED BY 'maxpwd';
+    GRANT ALL ON *.* TO 'maxuser'@'127.0.0.1' WITH GRANT OPTION;
+    GRANT ALL ON *.* TO 'maxuser'@'%' WITH GRANT OPTION;
+
+    SET GLOBAL gtid_strict_mode=ON;
+
+  replication.sql: |
+    RESET MASTER;
+    STOP SLAVE;
+    SET GLOBAL gtid_slave_pos='0-3000-0';
+    CHANGE MASTER TO 
+        MASTER_HOST='mariadb-0.mariadb-svc.default.svc.cluster.local', 
+        MASTER_PORT=3306, 
+        MASTER_USER='maxuser', 
+        MASTER_PASSWORD='maxpwd',
+        MASTER_USE_GTID=slave_pos;  
+    START SLAVE;
+    SET GLOBAL gtid_strict_mode=ON;
+
+  master-start-replication.sql: |
+    RESET MASTER;
+    STOP SLAVE;
+    SET GLOBAL gtid_slave_pos='0-3000-0';
+    CHANGE MASTER TO 
+        MASTER_HOST='localhost', 
+        MASTER_PORT=3306, 
+        MASTER_USER='maxuser', 
+        MASTER_PASSWORD='maxpwd',
+        MASTER_USE_GTID=slave_pos;
+    START SLAVE;
+    SET GLOBAL gtid_strict_mode=ON;
+
+  start-mariadb.sh: |
+    [[ $(hostname) =~ -([0-9]+)$ ]] || exit 1
+    export server_id=${BASH_REMATCH[1]}
+    cat /mnt/config-map/users.sql > docker-entrypoint-initdb.d/init.sql
+    if [ "$server_id" -eq 0 ]; then
+      cat /mnt/config-map/master-start-replication.sql >> docker-entrypoint-initdb.d/init.sql
+    else
+      cat /mnt/config-map/replication.sql >> docker-entrypoint-initdb.d/init.sql
+    fi
+    /usr/local/bin/docker-entrypoint.sh mysqld \
+      --relay-log=relaylog \
+      --log-bin=mariadb-bin \
+      --binlog-format=ROW \
+      --server-id=$((3000 + $server_id)) \
+      --log-slave-updates=1 \
+      --gtid-strict-mode=1 \
+      --innodb-flush-method=fsync
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mariadb
+  labels:
+    app: mariadb
+spec:
+  serviceName: mariadb-svc
+  selector:
+    matchLabels:
+      app: mariadb
+  replicas: 3
+  template:
+    metadata:
+      labels:
+        app: mariadb
+    spec:
+      containers:
+      - name: mariadb
+        image: mariadb:10.4.8
+        command:
+        - bash
+        - /mnt/config-map/start-mariadb.sh
+        env:
+        # 本番環境ではパスワードはSecretにすること
+        - name: MYSQL_ROOT_PASSWORD
+          value: "root"
+        ports:
+        - name: mariadb
+          containerPort: 3306
+        volumeMounts:
+        # - name: mariadb
+        #   mountPath: /etc/mysql/conf.d/my.cnf
+        #   subPath: my.cnf
+        - name: mariadb-sql
+          mountPath: /mnt/config-map
+        - name: mariadb-entrypoint-vol
+          mountPath: /docker-entrypoint-initdb.d
+        - name: data
+          mountPath: /var/lib/mysql
+          subPath: mysql
+        livenessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -ec
+            - >-
+              mysqladmin -h localhost --user=root --password=${MYSQL_ROOT_PASSWORD} ping
+          initialDelaySeconds: 5
+          periodSeconds: 30
+          timeoutSeconds: 5
+        readinessProbe:
+          exec:
+            command:
+            - /bin/bash
+            - -ec
+            - >-
+              mysql -h localhost --user=root --password=${MYSQL_ROOT_PASSWORD} -e "SELECT 1"
+          initialDelaySeconds: 5
+          periodSeconds: 30
+          timeoutSeconds: 5
+      volumes:
+      - name: mariadb
+        configMap:
+          name: mariadb-config
+      - name: mariadb-sql
+        configMap:
+          name: mariadb-config
+      # データディレクトリは本番環境はemptyDir以外にすること(hostPath、NFSなど)
+      - name: data
+        emptyDir: {}
+      - name: mariadb-entrypoint-vol
+        emptyDir: {}
