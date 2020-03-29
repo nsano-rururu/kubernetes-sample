@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: keycloakdb-svc
+spec:
+  ports:
+   - port: 3306
+  selector:
+    app: keycloakdb
+  clusterIP: None
+---
+apiVersion: apps/v1 # for versions before 1.9.0 use apps/v1beta2
+kind: Deployment
+metadata:
+  name: keycloakdb
+spec:
+  selector:
+    matchLabels:
+      app: keycloakdb
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: keycloakdb
+    spec:
+      containers:
+        - image: mariadb:10.4.8
+          name: keycloakdb
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              value: password
+            - name: MYSQL_DATABASE
+              value: keycloak
+            - name: MYSQL_USER
+              value: keycloak
+            - name: MYSQL_PASSWORD
+              value: password
+          ports:
+            - containerPort: 3306
+              name: keycloakdb
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mysql
+          livenessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - >-
+                  mysqladmin -h localhost --user=root --password=${MYSQL_ROOT_PASSWORD} ping
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            exec:
+              command:
+                - /bin/bash
+                - -ec
+                - >-
+                  mysql -h localhost --user=root --password=${MYSQL_ROOT_PASSWORD} -e "SELECT 1"
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 5
+      volumes:
+        # 実際に使用する場合はemptyDir以外にすること(hostPathなど)
+        - name: data
+          emptyDir: {}
