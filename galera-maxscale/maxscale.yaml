@@ -1,0 +1,107 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: maxscale
+  labels:
+    app: maxscale
+spec:
+  ports:
+  - name: maxscale-readwrite
+    port: 3306
+  clusterIP: None
+  selector:
+    app: maxscale
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maxscale-config
+  labels:
+    app: maxscale
+data:
+  maxscale.cnf: |
+    [maxscale]
+    threads=auto
+    admin_host=0.0.0.0
+
+    [dbserv1]
+    type=server
+    address=mariadb-0.mariadb-svc.default.svc.cluster.local
+    port=3306
+    protocol=mariadbbackend
+
+    [dbserv2]
+    type=server
+    address=mariadb-1.mariadb-svc.default.svc.cluster.local
+    port=3306
+    protocol=mariadbbackend
+
+    [dbserv3]
+    type=server
+    address=mariadb-2.mariadb-svc.default.svc.cluster.local
+    port=3306
+    protocol=mariadbbackend
+
+    [Splitter-Service]
+    type=service
+    router=readwritesplit
+    servers=dbserv1,dbserv2,dbserv3
+    user=maxuser
+    password=maxpwd
+
+    [Splitter-Listener]
+    type=listener
+    service=Splitter-Service
+    protocol=mariadbclient
+    port=3306
+
+    [Galera-Monitor]
+    type=monitor
+    module=galeramon
+    servers=dbserv1,dbserv2,dbserv3
+    user=maxuser
+    password=maxpwd
+    disable_master_failback=true
+    available_when_donor=true
+
+  start-maxscale-instance.sh: |
+    cp /etc/config-template/maxscale.cnf /etc/config-map/maxscale.cnf
+    maxscale -d -U maxscale --configdir=/etc/config-map -lstdout
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: maxscale
+  labels:
+    app: maxscale
+spec:
+  serviceName: maxscale
+  selector:
+    matchLabels:
+      app: maxscale
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: maxscale
+    spec:
+      containers:
+      - name: maxscale
+        image: mariadb/maxscale:2.4.2-0
+        command:
+        - bash
+        - /etc/config-template/start-maxscale-instance.sh 
+        ports:
+        - containerPort: 3306
+        volumeMounts:
+        - name: mariadb-config-vol
+          mountPath: /etc/config-map
+        - name: mariadb-config-template-vol
+          mountPath: /etc/config-template
+      restartPolicy: Always
+      volumes:
+      - name: mariadb-config-vol
+        emptyDir: {}
+      - name: mariadb-config-template-vol
+        configMap:
+          name: maxscale-config
